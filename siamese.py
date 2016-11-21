@@ -17,8 +17,12 @@ from keras import backend as K
 import matplotlib
 import matplotlib.pyplot as plt
 
-from siamese_nets import mnist_base, text_cnn_base
+from siamese_nets import mnist_base, text_cnn_base, text_lstm_base
 from data.data_utils import prepare_text_data, load_mr, load_glove
+
+def eucl_dist_output_shape(shapes):
+    shape1, shape2 = shapes
+    return (shape1[0], 1)
 
 def euclidean_distance(vects):
     """
@@ -26,10 +30,6 @@ def euclidean_distance(vects):
     """
     x, y = vects
     return K.sqrt(K.sum(K.square(x - y), axis=1, keepdims=True))
-
-def eucl_dist_output_shape(shapes):
-    shape1, shape2 = shapes
-    return (shape1[0], 1)
 
 def contrastive_loss(y_true, y_pred):
     """
@@ -68,65 +68,7 @@ def compute_accuracy(predictions, labels):
     """
     return labels[predictions.ravel() < 0.5].mean()
 
-def text():
-    max_len = 20
-    glove_dim = 50
-    datadict = load_mr()
-    embeddings_index = load_glove(glove_dim)
-    X_train, y_train, X_test, y_test, labels_index = prepare_text_data(datadict,
-                                                            embeddings_index,
-                                                            max_len)
-    y_train = np.array(y_train)
-    y_test = np.array(y_test)
-    nb_classes = len(labels_index)
-    nb_epoch = 10
-    text_indices = [np.where(y_train == i)[0] for i in range(nb_classes)]
-    tr_pairs, tr_y = create_pairs(X_train, text_indices, nb_classes)
-    text_indices = [np.where(y_test == i)[0] for i in range(nb_classes)]
-    te_pairs, te_y = create_pairs(X_test, text_indices, nb_classes)
-
-    input_shape = (max_len, glove_dim)
-    base_network = text_cnn_base(input_shape)
-    input_a = Input(shape=input_shape)
-    input_b = Input(shape=input_shape)
-    processed_a = base_network(input_a)
-    processed_b = base_network(input_b)
-    distance = Lambda(euclidean_distance,
-                      output_shape=eucl_dist_output_shape)([processed_a, processed_b])
-    model = Model(input=[input_a, input_b], output=distance)
-
-    # cross fingers and train
-    rms = RMSprop()
-    model.compile(loss=contrastive_loss, optimizer=rms)
-    model.fit([tr_pairs[:, 0], tr_pairs[:, 1]], tr_y,
-          validation_data=([te_pairs[:, 0], te_pairs[:, 1]], te_y),
-          batch_size=128,
-          nb_epoch=nb_epoch)
-
-    # compute final accuracy on training and test sets
-    pred = model.predict([tr_pairs[:, 0], tr_pairs[:, 1]])
-    tr_acc = compute_accuracy(pred, tr_y)
-    pred = model.predict([te_pairs[:, 0], te_pairs[:, 1]])
-    te_acc = compute_accuracy(pred, te_y)
-
-    print('* Accuracy on training set: %0.2f%%' % (100 * tr_acc))
-    print('* Accuracy on test set: %0.2f%%' % (100 * te_acc))
-
-    # plot in 2 dimensions
-    pred = base_network.predict(X_train) # TEzT / TRAIN
-    x = pred[:,0]
-    y = pred[:,1]
-    colors = ['red', 'green', 'blue', 'purple', 'cyan',
-              'yellow', 'magenta', 'black', 'beige', 'darkorange']
-    fig = plt.figure(figsize=(8,8))
-    plt.scatter(x, y, c=list(y_train),
-                cmap=matplotlib.colors.ListedColormap(colors[0:nb_classes]))
-    plt.show()
-
-def main():
-    """
-    load and prepare data, train and evaluate network
-    """
+def prepare_mnist():
     (X_train, y_train), (X_test, y_test) = mnist.load_data()
     img_rows, img_cols = 28, 28
 
@@ -147,32 +89,43 @@ def main():
 
     # create training+test positive and negative pairs
     digit_indices = [np.where(y_train == i)[0] for i in range(10)]
-    tr_pairs, tr_y = create_pairs(X_train, digit_indices)
+    tr_pairs, tr_y = create_pairs(X_train, digit_indices, 10)
 
     digit_indices = [np.where(y_test == i)[0] for i in range(10)]
     te_pairs, te_y = create_pairs(X_test, digit_indices, 10)
+    return input_shape, tr_pairs, tr_y, te_pairs, te_y
 
-    # network definition
-    base_network = mnist_base(input_shape)
+class Siamese(object):
+    def __init__(self, input_shape, f_architecture, g_architecture=None):
+        self.f = f_architecture
+        self.g = g_architecture
+        self.base_network = self.f(input_shape)
+        input_f = Input(shape=input_shape)
+        input_g = Input(shape=input_shape)
+        processed_f = self.base_network(input_f)
+        processed_g = self.base_network(input_g)
+        distance = Lambda(euclidean_distance,
+                            output_shape=eucl_dist_output_shape)([processed_f, processed_g])
+        self.model = Model(input=[input_f, input_g], output=distance)
+        rms = RMSprop()
+        self.model.compile(loss=contrastive_loss, optimizer=rms)
+    def fit_model(self, tr_pairs, tr_y, te_pairs, te_y, nb_epoch=1):
+        """
+        xx_pairs: 2-d numpy array. each row is a pair, each row has two items
+        xx_y: 1-d numpy array
+        """
+        self.model.fit([tr_pairs[:, 0], tr_pairs[:, 1]], tr_y,
+                    validation_data=([te_pairs[:, 0], te_pairs[:, 1]], te_y),
+                    batch_size=128, nb_epoch=nb_epoch)
 
-    input_a = Input(shape=input_shape)
-    input_b = Input(shape=input_shape)
+def main():
+    """
+    load and prepare data, train and evaluate network
+    """
+    input_shape, tr_pairs, tr_y, te_pairs, te_y = prepare_mnist()
 
-    processed_a = base_network(input_a)
-    processed_b = base_network(input_b)
-
-    distance = Lambda(euclidean_distance,
-                      output_shape=eucl_dist_output_shape)([processed_a, processed_b])
-
-    model = Model(input=[input_a, input_b], output=distance)
-
-    # cross fingers and train
-    rms = RMSprop()
-    model.compile(loss=contrastive_loss, optimizer=rms)
-    model.fit([tr_pairs[:, 0], tr_pairs[:, 1]], tr_y,
-          validation_data=([te_pairs[:, 0], te_pairs[:, 1]], te_y),
-          batch_size=128,
-          nb_epoch=nb_epoch)
+    siamese = Siamese(input_shape, mnist_base)
+    model = siamese.fit_model(tr_pairs, tr_y, te_pairs, te_y, nb_epoch=1)
 
     # compute final accuracy on training and test sets
     pred = model.predict([tr_pairs[:, 0], tr_pairs[:, 1]])
@@ -183,17 +136,18 @@ def main():
     print('* Accuracy on training set: %0.2f%%' % (100 * tr_acc))
     print('* Accuracy on test set: %0.2f%%' % (100 * te_acc))
 
+    make_plot = False
     # plot in 2 dimensions
-    pred = base_network.predict(X_test)
-    x = pred[:,0]
-    y = pred[:,1]
-    colors = ['red', 'green', 'blue', 'purple', 'cyan',
-              'yellow', 'magenta', 'black', 'beige', 'darkorange']
-    fig = plt.figure(figsize=(8,8))
-    plt.scatter(x, y, c=list(y_test),
+    if make_plot:
+        pred = siamese.base_network.predict(X_test)
+        x = pred[:,0]
+        y = pred[:,1]
+        colors = ['red', 'green', 'blue', 'purple', 'cyan',
+                'yellow', 'magenta', 'black', 'beige', 'darkorange']
+        fig = plt.figure(figsize=(8,8))
+        plt.scatter(x, y, c=list(y_test),
                 cmap=matplotlib.colors.ListedColormap(colors))
     plt.show()
 
 if __name__ == "__main__":
-    #main()
-    text()
+    main()
